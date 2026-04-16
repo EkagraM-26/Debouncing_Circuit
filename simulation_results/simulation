@@ -1,0 +1,235 @@
+"""
+simulate_debounce.py
+====================
+Simulates contact bounce and all three debounce algorithms.
+Plots before/after waveforms so you can visually verify behaviour
+and generate figures for your README or CV portfolio.
+
+Requirements:
+    pip install matplotlib numpy
+
+Usage:
+    python simulate_debounce.py
+"""
+
+import numpy as np
+import matplotlib.pyplot as plt
+import matplotlib.gridspec as gridspec
+
+# ── Simulation parameters ─────────────────────────────────────
+SAMPLE_RATE_KHZ  = 10       # samples per ms
+BOUNCE_DURATION  = 3        # ms of bouncing after press
+NUM_BOUNCES      = 8        # spikes during bounce period
+PRESS_START_MS   = 10       # when the button is pressed
+PRESS_END_MS     = 80       # when the button is released
+TOTAL_MS         = 100
+DEBOUNCE_MS      = 20       # timer-based window
+INTEGRATOR_MAX   = 10       # integrator saturates at this count
+
+
+def generate_bounce_signal(total_ms, sample_rate_khz,
+                            press_ms, release_ms,
+                            bounce_dur_ms, num_bounces):
+    """Generate a realistic bouncing button signal (active-low)."""
+    N   = total_ms * sample_rate_khz
+    sig = np.ones(N)                      # start HIGH (idle, pull-up)
+    press_s   = int(press_ms   * sample_rate_khz)
+    release_s = int(release_ms * sample_rate_khz)
+    bounce_n  = int(bounce_dur_ms * sample_rate_khz)
+
+    # Pressed region (LOW)
+    sig[press_s:release_s] = 0.0
+
+    # Add bounce spikes at press
+    for i in range(num_bounces):
+        spike_start = press_s + int(i * bounce_n / num_bounces)
+        spike_width = max(2, int(bounce_n / (num_bounces * 3)))
+        if i % 2 == 0:
+            sig[spike_start : spike_start + spike_width] = 1.0  # bounce back HIGH
+        else:
+            sig[spike_start : spike_start + spike_width] = 0.0
+
+    # Add a couple of bounce spikes at release too
+    for i in range(4):
+        spike_start = release_s + int(i * (bounce_n // 2) / 4)
+        spike_width = max(2, int(bounce_n / 16))
+        if i % 2 == 0:
+            sig[spike_start : spike_start + spike_width] = 0.0
+        else:
+            sig[spike_start : spike_start + spike_width] = 1.0
+
+    return sig
+
+
+def timer_debounce(raw, sample_rate_khz, window_ms):
+    """Timer-based debounce — locks out for window_ms after first edge."""
+    window_samples = int(window_ms * sample_rate_khz)
+    out    = np.ones(len(raw))
+    stable = raw[0]
+    last_change = 0
+    last_raw    = raw[0]
+
+    for i, r in enumerate(raw):
+        if r != last_raw:
+            last_raw    = r
+            last_change = i
+        if (i - last_change) >= window_samples:
+            if r != stable:
+                stable = r
+        out[i] = stable
+
+    return out
+
+
+def integrator_debounce(raw, max_count):
+    """Integrator debounce — saturating counter."""
+    out        = np.ones(len(raw))
+    stable     = raw[0]
+    integrator = max_count if raw[0] == 1.0 else 0
+
+    for i, r in enumerate(raw):
+        if r >= 0.5:
+            integrator = min(integrator + 1, max_count)
+        else:
+            integrator = max(integrator - 1, 0)
+
+        if integrator == max_count:
+            stable = 1.0
+        elif integrator == 0:
+            stable = 0.0
+
+        out[i] = stable
+
+    return out
+
+
+def state_machine_debounce(raw, sample_rate_khz, window_ms, held_ms):
+    """State-machine debounce — tracks IDLE/PRESSED/HELD/RELEASED."""
+    window_s = int(window_ms * sample_rate_khz)
+    held_s   = int(held_ms   * sample_rate_khz)
+    out      = np.ones(len(raw))
+    events   = []
+
+    IDLE, PRESSED, HELD, RELEASED = 0, 1, 2, 3
+    state  = IDLE
+    t0     = 0
+    stable = 1.0
+
+    for i, r in enumerate(raw):
+        if state == IDLE:
+            if r < 0.5:
+                state = PRESSED
+                t0    = i
+        elif state == PRESSED:
+            if r >= 0.5:
+                state = IDLE          # glitch, abort
+            elif (i - t0) >= window_s:
+                state  = HELD
+                stable = 0.0
+                events.append((i, 'PRESS'))
+                t0     = i
+        elif state == HELD:
+            if r >= 0.5:
+                state = RELEASED
+                t0    = i
+            elif (i - t0) >= held_s:
+                events.append((i, 'HOLD'))
+                t0 = i               # reset so HOLD fires once
+        elif state == RELEASED:
+            if r < 0.5:
+                state = PRESSED
+                t0    = i
+            elif (i - t0) >= window_s:
+                state  = IDLE
+                stable = 1.0
+                events.append((i, 'RELEASE'))
+
+        out[i] = stable
+
+    return out, events
+
+
+# ── Build signals ─────────────────────────────────────────────
+N   = TOTAL_MS * SAMPLE_RATE_KHZ
+t   = np.linspace(0, TOTAL_MS, N)
+
+raw  = generate_bounce_signal(TOTAL_MS, SAMPLE_RATE_KHZ,
+                               PRESS_START_MS, PRESS_END_MS,
+                               BOUNCE_DURATION, NUM_BOUNCES)
+
+timer_out = timer_debounce(raw, SAMPLE_RATE_KHZ, DEBOUNCE_MS)
+integ_out = integrator_debounce(raw, INTEGRATOR_MAX)
+sm_out, sm_events = state_machine_debounce(raw, SAMPLE_RATE_KHZ,
+                                            DEBOUNCE_MS, 500)
+
+# ── Plot ───────────────────────────────────────────────────────
+COLORS = {
+    'raw'   : '#E24B4A',
+    'timer' : '#1D9E75',
+    'integ' : '#7F77DD',
+    'sm'    : '#EF9F27',
+    'event' : '#185FA5',
+}
+
+fig = plt.figure(figsize=(14, 9), facecolor='#1a1a1a')
+fig.suptitle('Software Debounce — Algorithm Comparison',
+             color='#e0e0e0', fontsize=15, fontweight='bold', y=0.97)
+
+gs = gridspec.GridSpec(4, 1, hspace=0.55, left=0.08, right=0.95,
+                       top=0.92, bottom=0.07)
+
+ax_labels = ['Raw signal (bouncing)', 'Timer-based (20 ms window)',
+             'Integrator (10 samples)', 'State machine + long-press']
+signals   = [raw, timer_out, integ_out, sm_out]
+colors    = [COLORS['raw'], COLORS['timer'], COLORS['integ'], COLORS['sm']]
+
+axes = []
+for i, (label, sig, color) in enumerate(zip(ax_labels, signals, colors)):
+    ax = fig.add_subplot(gs[i])
+    ax.set_facecolor('#111111')
+    ax.plot(t, sig, color=color, linewidth=1.5, drawstyle='steps-post')
+    ax.set_ylim(-0.15, 1.35)
+    ax.set_yticks([0, 1])
+    ax.set_yticklabels(['LOW\n(pressed)', 'HIGH\n(idle)'],
+                       color='#aaaaaa', fontsize=8)
+    ax.set_ylabel(label, color=color, fontsize=9, fontweight='bold', labelpad=8)
+    ax.tick_params(colors='#888888')
+    for spine in ax.spines.values():
+        spine.set_edgecolor('#333333')
+    if i < 3:
+        ax.set_xticklabels([])
+    else:
+        ax.set_xlabel('Time (ms)', color='#aaaaaa', fontsize=9)
+    axes.append(ax)
+
+# Mark SM events on bottom plot
+for (idx, name) in sm_events:
+    x_ms = t[idx]
+    ev_color = {'PRESS': '#1D9E75', 'HOLD': '#EF9F27', 'RELEASE': '#E24B4A'}[name]
+    axes[3].axvline(x=x_ms, color=ev_color, linestyle='--', linewidth=1, alpha=0.8)
+    axes[3].text(x_ms + 0.5, 1.15, name, color=ev_color, fontsize=7.5)
+
+# Count spurious presses in raw vs debounced
+def count_presses(sig):
+    count = 0
+    for i in range(1, len(sig)):
+        if sig[i] < 0.5 and sig[i-1] >= 0.5:
+            count += 1
+    return count
+
+raw_presses   = count_presses(raw)
+timer_presses = count_presses(timer_out)
+integ_presses = count_presses(integ_out)
+sm_presses    = count_presses(sm_out)
+
+summary = (f"Raw: {raw_presses} apparent presses   "
+           f"| Timer: {timer_presses}   "
+           f"| Integrator: {integ_presses}   "
+           f"| State machine: {sm_presses}")
+fig.text(0.5, 0.01, summary, ha='center', color='#aaaaaa', fontsize=9)
+
+plt.savefig('debounce_comparison.png', dpi=150, bbox_inches='tight',
+            facecolor='#1a1a1a')
+print("Saved: debounce_comparison.png")
+print(summary)
+plt.show()
