@@ -112,7 +112,7 @@ switch (sm_debounce_get_event(&btn)) {
 
 ## Simulation (Python)
 
-Run the simulation to visualise all three algorithms on a synthetic bouncing signal:
+Ran the simulation to visualise all three algorithms on a synthetic bouncing signal:
 
 ```bash
 pip install matplotlib numpy
